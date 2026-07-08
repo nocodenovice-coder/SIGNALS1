@@ -35,11 +35,41 @@ jobs:
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
         run: node fetch-signals.mjs
 
-      - name: Commit updated seen.json
+      - name: Merge and push seen.json
         run: |
+          set -e
           git config user.name "site-tracker-bot"
           git config user.email "actions@github.com"
-          git add seen.json
-          git diff --staged --quiet || git commit -m "Update seen items [skip ci]"
-          git pull --rebase origin main
-          git push
+
+          # seen.json is never git-merged. Each attempt fetches the true latest seen.json
+          # from origin, unions it with this run's new-guids.json at the JSON level (via
+          # merge-seen.mjs), and tries a plain push. If the push is rejected because another
+          # run landed in the meantime, we just repeat with the newly-fetched state — this
+          # makes a text-level merge conflict on seen.json structurally impossible, since git
+          # is never asked to reconcile two diverging copies of the file.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+
+            node merge-seen.mjs
+            git add seen.json
+
+            if git diff --staged --quiet; then
+              echo "No new seen items to commit."
+              break
+            fi
+
+            git commit -m "Update seen items [skip ci]"
+
+            if git push origin HEAD:main; then
+              echo "Pushed seen.json update on attempt $attempt."
+              break
+            fi
+
+            if [ "$attempt" -eq 5 ]; then
+              echo "Failed to push seen.json after 5 attempts." >&2
+              exit 1
+            fi
+            echo "Push rejected (concurrent run) — retrying (attempt $attempt/5)..."
+            sleep $(( (RANDOM % 5) + 1 ))
+          done

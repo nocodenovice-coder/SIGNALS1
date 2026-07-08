@@ -5,7 +5,13 @@ import fs from 'fs';
 import path from 'path';
 
 const SEEN_PATH = path.join(process.cwd(), 'seen.json');
-const MAX_SEEN = 5000;
+// This run's newly-seen GUIDs are written here rather than merged into seen.json directly.
+// seen.json is committed once per day by many runs over time, and two runs' local edits to
+// the same JSON array used to produce real git merge conflicts on `git pull --rebase`. The
+// merge-seen.mjs script (invoked by the workflow, not this script) is the sole writer of
+// seen.json: it re-fetches the latest seen.json from origin and unions it with this file's
+// contents at JSON level, so git itself never has to reconcile diverging edits to the file.
+const NEW_GUIDS_PATH = path.join(process.cwd(), 'new-guids.json');
 
 // =========================================================================
 // CATEGORY TAXONOMY — every item gets classified into exactly one of these.
@@ -203,12 +209,6 @@ function loadSeen() {
   } catch {
     return new Set();
   }
-}
-
-function saveSeen(seenSet) {
-  const arr = Array.from(seenSet);
-  const trimmed = arr.slice(Math.max(0, arr.length - MAX_SEEN));
-  fs.writeFileSync(SEEN_PATH, JSON.stringify(trimmed, null, 2));
 }
 
 const MAX_AGE_DAYS = 90;
@@ -552,14 +552,15 @@ async function main() {
 
   if (newItems.length === 0) {
     console.log('Nothing new this run.');
+    fs.writeFileSync(NEW_GUIDS_PATH, JSON.stringify([], null, 2));
     return;
   }
 
   const sheetOk = await appendToGoogleSheet(newItems);
   await sendRunNotification(newItems.length, sheetOk);
 
-  newItems.forEach(item => seen.add(item.guid));
-  saveSeen(seen);
+  fs.writeFileSync(NEW_GUIDS_PATH, JSON.stringify(newItems.map(item => item.guid), null, 2));
+  console.log(`Wrote ${newItems.length} new GUID(s) to new-guids.json for the merge step.`);
 }
 
 main().catch(err => {
