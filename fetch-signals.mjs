@@ -43,7 +43,35 @@ function extractCompany(text) {
   if (m) return (m[1] + ' ' + m[2]).trim();
   m = text.match(/^([A-Z][A-Za-z&'.]*(?:\s+[A-Z][A-Za-z&'.]*){0,3})\s+(?:is|has|opens|opened|expands|expanding|announces|hiring|relocat\w*)/);
   if (m) return m[1].trim();
+  // Fallback: a capitalized multi-word sequence anywhere in the text, preceding common
+  // announcement verbs — catches headlines where the company isn't the first word, e.g.
+  // "Third UK store for Acme Retail opens in Leeds". Lower confidence than the two patterns
+  // above, but still meaningfully better than leaving it unresolved.
+  m = text.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\s+(?:to open|opens|opened|confirms|plans|reveals|announces|unveils|relocat\w*)/);
+  if (m) {
+    const candidate = m[1].trim();
+    const commonNonCompanyWords = /^(The|New|UK|This|That|Local|Police|Council|First|Second|Third|Fourth|Fifth|Sixth|A|An|In|On|At|Following|After|Before|During)\b/;
+    if (!commonNonCompanyWords.test(candidate)) return candidate;
+  }
   return '(unresolved — check manually)';
+}
+
+// ---- Multi-site relevance filter ----
+// Applied to news-derived items only (growth + risk RSS). Purpose: exclude one-off stories
+// about single independent premises (a lone corner shop robbery, a single café opening) that
+// aren't useful signals for a business whose target is established or scaling multi-site
+// operators. This is a heuristic, not a lookup against real site-count data — it passes an
+// item through if EITHER the company name resolved via a strong chain-suffix pattern
+// (Ltd/Group/plc — companies structured this way are far more often multi-site than sole
+// traders) OR the text itself contains explicit multi-site language. It will still let some
+// single-site stories through and may drop a few genuine multi-site items that happen to be
+// phrased without any of these cues — it trades recall for less noise, on purpose, per what
+// was asked for.
+function isLikelyMultiSite(text) {
+  const hasStrongCompanySuffix = /\b(Ltd|Limited|Group|plc|PLC|LLP)\b/.test(text);
+  const lower = text.toLowerCase();
+  const hasMultiSiteLanguage = /\bchain\b|\bfranchise\b|\bnationwide\b|\bacross the uk\b|\bbranches\b|\boutlets\b|\bstores? (nationwide|across)|\bthe retailer\b|\bsupermarket chain\b|\bmulti-?site\b|\b(1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:\w+\s+){0,2}(site|store|branch|location|shop|outlet)\b/.test(lower);
+  return hasStrongCompanySuffix || hasMultiSiteLanguage;
 }
 
 const UK_AREAS = [
@@ -137,8 +165,22 @@ function saveSeen(seenSet) {
   fs.writeFileSync(SEEN_PATH, JSON.stringify(trimmed, null, 2));
 }
 
+const MAX_AGE_DAYS = 90;
+
+function isWithinMaxAge(pubDateStr) {
+  if (!pubDateStr) return true; // if no date given, don't drop it on this basis alone
+  const parsed = new Date(pubDateStr);
+  if (isNaN(parsed.getTime())) return true; // unparseable date — don't drop on this basis
+  const ageDays = (Date.now() - parsed.getTime()) / (1000 * 60 * 60 * 24);
+  return ageDays <= MAX_AGE_DAYS;
+}
+
 async function fetchGoogleNewsRSS(query) {
-  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-GB&gl=GB&ceid=GB:en`;
+  // "when:90d" is an unofficial but well-documented Google News search operator that
+  // restricts results to the last 90 days. Since it's unofficial, the pubDate check below
+  // acts as a second, independent filter in case Google silently stops honouring it.
+  const dateRestrictedQuery = `${query} when:${MAX_AGE_DAYS}d`;
+  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(dateRestrictedQuery)}&hl=en-GB&gl=GB&ceid=GB:en`;
   const res = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; site-tracker-bot/1.0)' },
   });
@@ -158,17 +200,24 @@ async function fetchGoogleNewsRSS(query) {
   const items = parsed?.rss?.channel?.item;
   if (!items) return [];
   const list = Array.isArray(items) ? items : [items];
-  return list.map(item => {
+  const results = [];
+  for (const item of list) {
     const title = String(item.title || '').trim();
-    return {
+    const pubDate = String(item.pubDate || '').trim();
+
+    if (!isWithinMaxAge(pubDate)) continue; // too old — drop regardless of when: having worked
+    if (!isLikelyMultiSite(title)) continue; // no multi-site indicator — likely a one-off single premises
+
+    results.push({
       business: extractCompany(title),
       category: classifyCategory(title),
       location: extractLocation(title),
       region: extractRegion(title),
       sourceLink: String(item.link || '').trim(),
       guid: String(item.guid?.['#text'] || item.guid || item.link || title),
-    };
-  });
+    });
+  }
+  return results;
 }
 
 async function fetchAllRSS(queries) {
