@@ -438,6 +438,7 @@ async function fetchGoogleNewsRSS(query) {
       category: classifyCategory(title),
       location: extractLocation(title),
       region: extractRegion(title),
+      date: formatSourceDate(pubDate), // the article's own publish date
       sourceLink: String(item.link || '').trim(),
       guid: String(item.guid?.['#text'] || item.guid || item.link || title),
       rawTitle: originalTitle, // kept off the sheet write; used only for the failures audit log
@@ -587,6 +588,7 @@ async function fetchAdzunaSignals() {
           category: classifyCategory(job.title || '') || CATEGORIES.NEW_SITE,
           location: locationName,
           region: extractRegion(locationName),
+          date: formatSourceDate(job.created), // the job posting's own creation date
           sourceLink: job.redirect_url || '',
           guid: `adzuna-${job.id}`,
         });
@@ -645,6 +647,7 @@ async function fetchCompaniesHouseIncorporationSweep() {
           category: CATEGORIES.NEW_SITE,
           location: address,
           region: extractRegion(locality),
+          date: formatSourceDate(company.date_of_creation), // the company's actual incorporation date
           sourceLink: `https://find-and-update.company-information.service.gov.uk/company/${company.company_number}`,
           guid: `ch-sweep-${company.company_number}`,
         });
@@ -695,6 +698,11 @@ async function fetchFSANewRegistrations() {
           category: CATEGORIES.NEW_SITE,
           location: locationText,
           region: extractRegion(locationText),
+          // No date column here on purpose: these are "AwaitingInspection" records (see the
+          // fetchFSANewRegistrations comment above) and the FSA API has no registration-date
+          // field — RatingDate is null until the first inspection happens. Leaving it blank is
+          // honest; guessing at a date would misrepresent the source data.
+          date: '',
           sourceLink: `https://ratings.food.gov.uk/business/en-GB/${est.FHRSID}`,
           guid: `fsa-${est.FHRSID}`,
         });
@@ -708,7 +716,18 @@ async function fetchFSANewRegistrations() {
   return results;
 }
 
-const SHEET_HEADER = ['Business', 'Category', 'Location', 'Region', 'Source link'];
+const SHEET_HEADER = ['Business', 'Category', 'Location', 'Region', 'Source link', 'Date'];
+
+// Formats a source's own date field (article pubDate, job posting date, incorporation date)
+// into a plain YYYY-MM-DD for the sheet. Returns '' if missing/unparseable — a blank cell is
+// honest; a fabricated date isn't. This is the date the underlying thing happened, not the
+// date this workflow run fetched it (that's already the tab name, e.g. "2026-07-08").
+function formatSourceDate(dateStr) {
+  if (!dateStr) return '';
+  const parsed = new Date(dateStr);
+  if (isNaN(parsed.getTime())) return '';
+  return parsed.toISOString().slice(0, 10);
+}
 
 function todayTabName() {
   return new Date().toISOString().slice(0, 10); // e.g. "2026-07-08"
@@ -737,7 +756,7 @@ async function ensureDatedSheetTab(sheets, spreadsheetId, tabName) {
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${quoteSheetName(tabName)}!A1:E1`,
+    range: `${quoteSheetName(tabName)}!A1:F1`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [SHEET_HEADER] },
   });
@@ -761,11 +780,11 @@ async function appendToGoogleSheet(rows) {
     const tabName = todayTabName();
     await ensureDatedSheetTab(sheets, GOOGLE_SHEET_ID, tabName);
 
-    const values = rows.map(r => [r.business, r.category, r.location, r.region || 'Unclassified', r.sourceLink]);
+    const values = rows.map(r => [r.business, r.category, r.location, r.region || 'Unclassified', r.sourceLink, r.date || '']);
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: GOOGLE_SHEET_ID,
-      range: `${quoteSheetName(tabName)}!A:E`,
+      range: `${quoteSheetName(tabName)}!A:F`,
       valueInputOption: 'USER_ENTERED',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values },
