@@ -1,3 +1,4 @@
+```markdown
 # Site tracker fetch bot
 
 Runs on a schedule (free, via GitHub Actions), pulls growth and physical-risk signals from
@@ -123,6 +124,32 @@ The `JOB_TITLES` array near the top of `fetch-signals.mjs` is maintained on your
 send the full list of titles you want tracked, and they get added to this array in the code.
 You don't need to touch the file yourself for this.
 
+## Fixes made after the first live run
+
+The first real run surfaced three problems, now fixed:
+
+1. **Old articles.** Google News RSS was returning items up to a year old. Fixed two ways:
+   `when:90d` is added to every query (an unofficial but well-documented Google News operator
+   restricting results to the last 90 days), plus an independent check on each article's
+   published date that drops anything older than 90 days regardless — this second check exists
+   because `when:` isn't officially documented and could silently stop working; the date check
+   doesn't depend on Google honouring anything.
+2. **Single-shop noise** (e.g. a lone corner-shop robbery with no chain behind it). Added a
+   multi-site relevance filter: a growth/risk article only makes it into the sheet if either its
+   company name resolved via a strong chain-suffix pattern (Ltd/Group/plc — sole traders rarely
+   register this way) or the article text itself contains explicit multi-site language ("chain,"
+   "branches," "nationwide," "third store," etc.). **This is a heuristic, not a real site-count
+   lookup** — there's no data source here that actually knows how many locations a business has.
+   It will still occasionally let a single-site story through, and it will drop some genuine
+   multi-site stories that happen to be phrased without any of these cues (a single-word brand
+   name like "Chipotle" or "Amazon" with no chain-language nearby won't pass unless the article
+   happens to mention "chain" or a store count) — this trades recall for less noise, on purpose.
+3. **Business names not resolving.** Broadened the extraction patterns to catch company names
+   that aren't the first word of a headline, and to catch single-word brand names (previously the
+   pattern required at least two capitalized words). Still not perfect — headlines are genuinely
+   inconsistent in structure — but meaningfully fewer "(unresolved — check manually)" rows than
+   before.
+
 ## Known limitations, stated plainly
 
 - **No live testing was done against the actual Google Sheets, Companies House, Adzuna, or FSA
@@ -135,3 +162,4 @@ You don't need to touch the file yourself for this.
 - The FSA source is a sample of "awaiting inspection" businesses, not a complete new-registration
   feed — see the data sources section above.
 - No LinkedIn coverage — no cheap, ToS-safe way to automate that.
+```
