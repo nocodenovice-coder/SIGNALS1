@@ -38,21 +38,67 @@ function classifyCategory(text) {
   return CATEGORIES.UNCATEGORISED;
 }
 
-function extractCompany(text) {
-  let m = text.match(/([A-Z][A-Za-z&'.]*(?:\s+[A-Z][A-Za-z&'.]*){0,4})\s+(Ltd|Limited|Group|plc|PLC|LLP)\b/);
-  if (m) return (m[1] + ' ' + m[2]).trim();
-  m = text.match(/^([A-Z][A-Za-z&'.]*(?:\s+[A-Z][A-Za-z&'.]*){0,3})\s+(?:is|has|opens|opened|expands|expanding|announces|hiring|relocat\w*)/);
-  if (m) return m[1].trim();
-  // Fallback: a capitalized multi-word sequence anywhere in the text, preceding common
-  // announcement verbs — catches headlines where the company isn't the first word, e.g.
-  // "Third UK store for Acme Retail opens in Leeds". Lower confidence than the two patterns
-  // above, but still meaningfully better than leaving it unresolved.
-  m = text.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\s+(?:to open|opens|opened|confirms|plans|reveals|announces|unveils|relocat\w*)/);
-  if (m) {
-    const candidate = m[1].trim();
-    const commonNonCompanyWords = /^(The|New|UK|This|That|Local|Police|Council|First|Second|Third|Fourth|Fifth|Sixth|A|An|In|On|At|Following|After|Before|During)\b/;
-    if (!commonNonCompanyWords.test(candidate)) return candidate;
-  }
+// Google News RSS titles are formatted "Headline - Publisher Name". Strip the trailing
+// " - Publisher" segment before any classification/extraction runs on the title — otherwise
+// a publisher name that happens to end in "plc"/"Group" (e.g. "... - Reach plc") can be
+// mistaken for the business itself by the chain-suffix pattern below.
+function stripSource(title) {
+  const m = title.match(/^(.*)\s+-\s+([^-]+)$/);
+  if (m && m[2].length <= 40) return m[1].trim();
+  return title;
+}
+
+const NAME_WORD = `[A-Z][A-Za-z0-9&'.]*`;
+const NAME_CONNECTOR = `(?:&|and|of|A)`;
+// A run of capitalized "words" allowing short connectors through, so multi-word brand names
+// like "Pret A Manger" or "Marks & Spencer" aren't truncated at the connector.
+const COMPANY_NAME = `${NAME_WORD}(?:\\s+(?:${NAME_WORD}|${NAME_CONNECTOR})){0,4}`;
+
+const TRIGGER_VERBS = 'is|has|opens?|opened|opening|expands?|expanding|announces?|announced|hiring|relocat\\w*|to open|confirms?|confirmed|plans?|planned|reveals?|revealed|unveils?|unveiled|moves?|moved|moving';
+const PREMISES_NOUNS = 'store|shop|branch|site|outlet|restaurant|café|cafe|depot|centre|center|facility|warehouse|premises|unit|clinic|gym|nursery|supermarket|superstore|showroom';
+
+const NON_COMPANY_WORDS = /^(The|New|UK|This|That|Local|Police|Officers?|Detectives?|Council|First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth|Ninth|Tenth|A|An|In|On|At|Man|Woman|Following|After|Before|During|Nationwide|One|Two|Three)\b/;
+
+function isPlausibleCompanyName(candidate) {
+  return !!candidate && !NON_COMPANY_WORDS.test(candidate);
+}
+
+// Layered fallback: each pattern is lower-confidence than the last. Supports single-word
+// brand names (Amazon, Chipotle) as well as multi-word company names — a pattern doesn't
+// need a Ltd/Group/plc suffix to match, it just needs to sit next to a recognisable trigger.
+function extractCompany(rawText) {
+  const text = stripSource(rawText);
+
+  // 1. Strong chain-suffix pattern (Ltd/Limited/Group/plc/LLP) — highest confidence, matches
+  // anywhere in the text.
+  let m = text.match(new RegExp(`(${COMPANY_NAME})\\s+(Ltd|Limited|Group|plc|PLC|LLP)\\b`));
+  if (m) return `${m[1]} ${m[2]}`.trim();
+
+  // 2. Company name at the very start of the headline, directly followed by a trigger verb.
+  m = text.match(new RegExp(`^(${COMPANY_NAME})\\s+(?:${TRIGGER_VERBS})\\b`));
+  if (m && isPlausibleCompanyName(m[1])) return m[1].trim();
+
+  // 3. Company name at the start, followed by a premises noun, then a trigger verb —
+  // e.g. "Costa Coffee store opens in Brighton", "Tesco Express store to open in Leeds".
+  m = text.match(new RegExp(`^(${COMPANY_NAME})\\s+(?:${PREMISES_NOUNS})\\s+(?:${TRIGGER_VERBS})\\b`));
+  if (m && isPlausibleCompanyName(m[1])) return m[1].trim();
+
+  // 4. "New <Company> [premises noun] <trigger>" — company preceded by a leading filler word.
+  m = text.match(new RegExp(`^(?:New|A new|The new)\\s+(${COMPANY_NAME})\\s+(?:(?:${PREMISES_NOUNS})\\s+)?(?:${TRIGGER_VERBS})\\b`));
+  if (m && isPlausibleCompanyName(m[1])) return m[1].trim();
+
+  // 5. Company name anywhere, directly followed by a trigger verb (mid-headline, e.g.
+  // "Third UK store for Acme Retail opens in Leeds").
+  m = text.match(new RegExp(`\\b(${COMPANY_NAME})\\s+(?:${TRIGGER_VERBS})\\b`));
+  if (m && isPlausibleCompanyName(m[1])) return m[1].trim();
+
+  // 6. "at <Company> branch/store" — common phrasing in burglary/robbery headlines where the
+  // business isn't the grammatical subject. Lower confidence: risks false positives on
+  // capitalized place names ("at Oxford Street store"), but resolves a real class of risk
+  // headlines that would otherwise always be unresolved.
+  m = text.match(new RegExp(`\\bat\\s+(${COMPANY_NAME})\\s+(?:${PREMISES_NOUNS})\\b`));
+  if (m && isPlausibleCompanyName(m[1])) return m[1].trim();
+
   return '(unresolved — check manually)';
 }
 
@@ -202,7 +248,7 @@ async function fetchGoogleNewsRSS(query) {
   const list = Array.isArray(items) ? items : [items];
   const results = [];
   for (const item of list) {
-    const title = String(item.title || '').trim();
+    const title = stripSource(String(item.title || '').trim());
     const pubDate = String(item.pubDate || '').trim();
 
     if (!isWithinMaxAge(pubDate)) continue; // too old — drop regardless of when: having worked
@@ -388,6 +434,41 @@ async function fetchFSANewRegistrations() {
   return results;
 }
 
+const SHEET_HEADER = ['Business', 'Category', 'Location', 'Region', 'Source link'];
+
+function todayTabName() {
+  return new Date().toISOString().slice(0, 10); // e.g. "2026-07-08"
+}
+
+// Sheet names containing characters other than letters/digits/underscore must be single-quoted
+// in A1 notation; date-formatted tab names ("2026-07-08") require this.
+function quoteSheetName(name) {
+  return `'${name.replace(/'/g, "''")}'`;
+}
+
+// Creates today's dated tab (with header row) if it doesn't already exist yet. If the
+// workflow runs twice in one day, the existing tab is reused as-is — no duplicate header.
+async function ensureDatedSheetTab(sheets, spreadsheetId, tabName) {
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets.properties.title',
+  });
+  const existingTitles = (meta.data.sheets || []).map(s => s.properties.title);
+  if (existingTitles.includes(tabName)) return;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${quoteSheetName(tabName)}!A1:E1`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [SHEET_HEADER] },
+  });
+}
+
 async function appendToGoogleSheet(rows) {
   const { GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SHEET_ID } = process.env;
   if (!GOOGLE_SERVICE_ACCOUNT_JSON || !GOOGLE_SHEET_ID) {
@@ -403,17 +484,20 @@ async function appendToGoogleSheet(rows) {
     });
     const sheets = google.sheets({ version: 'v4', auth });
 
+    const tabName = todayTabName();
+    await ensureDatedSheetTab(sheets, GOOGLE_SHEET_ID, tabName);
+
     const values = rows.map(r => [r.business, r.category, r.location, r.region || 'Unclassified', r.sourceLink]);
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: GOOGLE_SHEET_ID,
-      range: 'Sheet1!A:E',
+      range: `${quoteSheetName(tabName)}!A:E`,
       valueInputOption: 'USER_ENTERED',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values },
     });
 
-    console.log(`Appended ${rows.length} row(s) to Google Sheet.`);
+    console.log(`Appended ${rows.length} row(s) to Google Sheet tab "${tabName}".`);
     return true;
   } catch (e) {
     console.error('Google Sheets write failed:', e.message);
