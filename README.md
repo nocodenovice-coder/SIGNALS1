@@ -104,6 +104,7 @@ your-repo/
 | `GOOGLE_SHEET_ID` | The Sheet ID from step 1.1 |
 | `COMPANIES_HOUSE_API_KEY` | Free key at https://developer.company-information.service.gov.uk/ |
 | `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` | Free registration at https://developer.adzuna.com/ |
+| `ANTHROPIC_API_KEY` | Optional — powers a small Claude Haiku fallback for headlines the regex extraction leaves unresolved. Get a key at https://console.anthropic.com/. Costs a fraction of a cent per run (Haiku 4.5 pricing); the script checks for the key and just skips the fallback if it's not set. |
 | `GMAIL_USER` / `GMAIL_APP_PASSWORD` / `DIGEST_TO_EMAIL` | Optional — only for a short "N rows added" notification email. See below for the App Password steps if you want this. |
 
 The email notification is now just a short ping, not the main output — the Sheet is where the
