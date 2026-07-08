@@ -618,7 +618,11 @@ async function fetchCompaniesHouseIncorporationSweep() {
   }
 
   const auth = Buffer.from(`${apiKey}:`).toString('base64');
-  const fromDate = isoDateDaysAgo(3);
+  // The workflow runs weekly (see .github/workflows/fetch-signals.yml), so this needs to
+  // cover at least 7 days back to avoid a gap between runs, plus a few days of safety
+  // margin. seen.json dedup already prevents duplicate rows from the overlap, so there's no
+  // downside to the extra buffer — 10 days covers a weekly cadence with 3 days to spare.
+  const fromDate = isoDateDaysAgo(10);
   const toDate = isoDateDaysAgo(0);
   const results = [];
 
