@@ -1,0 +1,18 @@
+{
+  "name": "site-tracker-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "fast-xml-parser": "^5.9.3",
+    "googleapis": "^173.0.0",
+    "nodemailer": "^9.0.3"
+  },
+  "type": "module"
+}
