@@ -683,8 +683,10 @@ function quoteSheetName(name) {
   return `'${name.replace(/'/g, "''")}'`;
 }
 
-// Creates today's dated tab (with header row) if it doesn't already exist yet. If the
-// workflow runs twice in one day, the existing tab is reused as-is — no duplicate header.
+// Creates today's dated tab (with header row + a filter on it) if it doesn't already exist
+// yet. If the workflow runs twice in one day, the existing tab is reused as-is — no
+// duplicate header, and no re-applied filter that would clobber any manual filter/sort
+// state the user set on the tab earlier that day.
 async function ensureDatedSheetTab(sheets, spreadsheetId, tabName) {
   const meta = await sheets.spreadsheets.get({
     spreadsheetId,
@@ -693,16 +695,39 @@ async function ensureDatedSheetTab(sheets, spreadsheetId, tabName) {
   const existingTitles = (meta.data.sheets || []).map(s => s.properties.title);
   if (existingTitles.includes(tabName)) return;
 
-  await sheets.spreadsheets.batchUpdate({
+  const addSheetResponse = await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
     requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
   });
+  const sheetId = addSheetResponse.data.replies[0].addSheet.properties.sheetId;
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `${quoteSheetName(tabName)}!A1:F1`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [SHEET_HEADER] },
+  });
+
+  // Basic filter on the header + data range, so the tab is immediately filterable/sortable
+  // without a manual "Data > Create a filter" step each week. endRowIndex is left unset
+  // (unbounded) so the filter keeps covering rows appended later the same day by subsequent
+  // runs; endColumnIndex matches SHEET_HEADER's width so it stays correct if columns change.
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [{
+        setBasicFilter: {
+          filter: {
+            range: {
+              sheetId,
+              startRowIndex: 0,
+              startColumnIndex: 0,
+              endColumnIndex: SHEET_HEADER.length,
+            },
+          },
+        },
+      }],
+    },
   });
 }
 
