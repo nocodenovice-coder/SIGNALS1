@@ -520,9 +520,9 @@ async function runWithConcurrency(items, limit, fn) {
 }
 
 // Mutates `items` in place: any item with an unresolved business name and a raw headline
-// (i.e. RSS-derived — Adzuna/Companies House/FSA items already have a structured business
-// field and never need this) gets one Haiku call asking it to name the business, or say so
-// if it can't. Sets item.business only when the model returns a confident name.
+// (i.e. RSS-derived — Adzuna/Companies House items already have a structured business field
+// and never need this) gets one Haiku call asking it to name the business, or say so if it
+// can't. Sets item.business only when the model returns a confident name.
 async function applyLLMBusinessNameFallback(items) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -660,62 +660,6 @@ async function fetchCompaniesHouseIncorporationSweep() {
   return results;
 }
 
-// =========================================================================
-// SOURCE 5: Food Standards Agency — new food business registrations
-// Free, no API key, updated daily. Food/hospitality sector only.
-//
-// IMPORTANT LIMITATION, stated plainly: the FSA API has no "sort by newest"
-// or "registered in the last N days" option — the only sort keys it supports
-// are Relevance, rating, desc_rating, alpha, desc_alpha, distance. So this
-// can't ask for "what's new since yesterday" directly. Instead it filters on
-// ratingKey=AwatingInspection (that's FSA's own spelling, not a typo introduced
-// here — check their docs if this ever needs updating) — a business awaiting
-// its first inspection is a strong proxy for "recently registered," since
-// inspections happen soon after registration. This is a sample of several
-// hundred UK-wide "awaiting inspection" records each run, not an exhaustive
-// feed, and dedup against seen.json is what actually surfaces new ones over
-// time rather than any date filter on the source itself.
-// =========================================================================
-async function fetchFSANewRegistrations() {
-  const results = [];
-  const PAGES_TO_FETCH = 5; // ~250 records per run — a sample, not exhaustive
-  for (let page = 1; page <= PAGES_TO_FETCH; page++) {
-    try {
-      const url = `https://api.ratings.food.gov.uk/Establishments?ratingKey=AwatingInspection&pageSize=50&pageNumber=${page}`;
-      const res = await fetch(url, { headers: { 'x-api-version': '2', accept: 'application/json' } });
-      if (!res.ok) {
-        console.error(`FSA fetch failed on page ${page}: ${res.status}`);
-        break;
-      }
-      const data = await res.json();
-      const establishments = data.establishments || [];
-      if (establishments.length === 0) break; // ran out of pages
-
-      for (const est of establishments) {
-        const locationText = est.AddressLine3 || est.AddressLine4 || est.PostCode || '(unresolved — check manually)';
-        results.push({
-          business: est.BusinessName || '(unresolved — check manually)',
-          category: CATEGORIES.NEW_SITE,
-          location: locationText,
-          region: extractRegion(locationText),
-          // No date column here on purpose: these are "AwaitingInspection" records (see the
-          // fetchFSANewRegistrations comment above) and the FSA API has no registration-date
-          // field — RatingDate is null until the first inspection happens. Leaving it blank is
-          // honest; guessing at a date would misrepresent the source data.
-          date: '',
-          sourceLink: `https://ratings.food.gov.uk/business/en-GB/${est.FHRSID}`,
-          guid: `fsa-${est.FHRSID}`,
-        });
-      }
-      await new Promise(r => setTimeout(r, 300));
-    } catch (e) {
-      console.error(`FSA fetch error on page ${page}:`, e.message);
-      break;
-    }
-  }
-  return results;
-}
-
 const SHEET_HEADER = ['Business', 'Category', 'Location', 'Region', 'Source link', 'Date'];
 
 // Formats a source's own date field (article pubDate, job posting date, incorporation date)
@@ -833,10 +777,7 @@ async function main() {
   console.log('Running Companies House SIC-code sweep...');
   const chSweepItems = await fetchCompaniesHouseIncorporationSweep();
 
-  console.log('Fetching FSA new food business registrations...');
-  const fsaItems = await fetchFSANewRegistrations();
-
-  const allItems = [...growthItems, ...riskItems, ...adzunaItems, ...chSweepItems, ...fsaItems];
+  const allItems = [...growthItems, ...riskItems, ...adzunaItems, ...chSweepItems];
   console.log(`Fetched ${allItems.length} total items before dedupe.`);
 
   const seen = loadSeen();

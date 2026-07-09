@@ -40,13 +40,6 @@ Every row gets classified into exactly one of these (edit `classifyCategory()` i
 - **Companies House SIC-code sweep** — free (needs an API key), fully automatic, no manual input.
   Noisier than the other sources: most new incorporations are single-site startups, and the
   registered office address is often an accountant's office, not the trading site.
-- **Food Standards Agency (FSA) new registrations** — free, no key needed, food/hospitality only.
-  **Real limitation, not a corner case**: the FSA API has no "sort by newest" option at all —
-  the only sort keys it supports are relevance, rating, and alphabetical. This pulls a same-shaped
-  sample of "awaiting inspection" businesses each run (a reasonable proxy for "recently
-  registered," since inspections follow registration) and relies on de-duplication against
-  `seen.json` to slowly surface genuinely new ones over time. It is a sample, not an exhaustive
-  feed of every new UK food business.
 
 ## What's deliberately NOT included, and why
 
@@ -153,14 +146,12 @@ The first real run surfaced three problems, now fixed:
 
 ## Known limitations, stated plainly
 
-- **No live testing was done against the actual Google Sheets, Companies House, Adzuna, or FSA
+- **No live testing was done against the actual Google Sheets, Companies House, or Adzuna
   endpoints before handing this over** — this was built in a sandboxed environment that couldn't
   reach any of these. Every function was checked for correct syntax, correct method calls against
   the actual installed libraries, and correct response-parsing logic against realistic sample
   data pulled from each service's own documentation — but watch the first several runs' logs and
   Sheet output closely rather than trusting it blindly.
 - Google News RSS is unofficial and could change format without notice.
-- The FSA source is a sample of "awaiting inspection" businesses, not a complete new-registration
-  feed — see the data sources section above.
 - No LinkedIn coverage — no cheap, ToS-safe way to automate that.
 ```
