@@ -3,7 +3,13 @@ name: Fetch site tracker signals
 on:
   schedule:
     - cron: '0 7 * * 1' # weekly — Monday 07:00 UTC
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Run the one-time Sheet1 historical backfill (last 90 days) instead of the normal weekly fetch'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -34,7 +40,12 @@ jobs:
           ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: node fetch-signals.mjs
+        run: |
+          if [ "${{ inputs.backfill }}" = "true" ]; then
+            node fetch-signals.mjs --backfill
+          else
+            node fetch-signals.mjs
+          fi
 
       - name: Upload unresolved-item audit log
         if: always()

@@ -389,21 +389,29 @@ function loadSeen() {
   }
 }
 
-const MAX_AGE_DAYS = 90;
+// Ongoing weekly cadence: 7-day gap between runs + a few days of safety margin, same
+// reasoning already used for the Companies House sweep window. This used to be 90 — that
+// was fine when the workflow ran daily, but on a weekly cadence it means a run can surface
+// an article for the first time that's up to ~85 days old: correctly dated, but it makes a
+// tab's Date column look "random" next to genuinely fresh finds from the same week (verified
+// against live data — see the fetch-signals PR notes / commit message). The one-time Sheet1
+// backfill (backfillSheet1(), below) explicitly overrides this back to 90 days, since that's
+// meant to be a wide historical snapshot, not an ongoing-cadence window.
+const MAX_AGE_DAYS = 10;
 
-function isWithinMaxAge(pubDateStr) {
+function isWithinMaxAge(pubDateStr, maxAgeDays = MAX_AGE_DAYS) {
   if (!pubDateStr) return true; // if no date given, don't drop it on this basis alone
   const parsed = new Date(pubDateStr);
   if (isNaN(parsed.getTime())) return true; // unparseable date — don't drop on this basis
   const ageDays = (Date.now() - parsed.getTime()) / (1000 * 60 * 60 * 24);
-  return ageDays <= MAX_AGE_DAYS;
+  return ageDays <= maxAgeDays;
 }
 
-async function fetchGoogleNewsRSS(query) {
-  // "when:90d" is an unofficial but well-documented Google News search operator that
-  // restricts results to the last 90 days. Since it's unofficial, the pubDate check below
+async function fetchGoogleNewsRSS(query, maxAgeDays = MAX_AGE_DAYS) {
+  // "when:Nd" is an unofficial but well-documented Google News search operator that
+  // restricts results to the last N days. Since it's unofficial, the pubDate check below
   // acts as a second, independent filter in case Google silently stops honouring it.
-  const dateRestrictedQuery = `${query} when:${MAX_AGE_DAYS}d`;
+  const dateRestrictedQuery = `${query} when:${maxAgeDays}d`;
   const url = `https://news.google.com/rss/search?q=${encodeURIComponent(dateRestrictedQuery)}&hl=en-GB&gl=GB&ceid=GB:en`;
   const res = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; site-tracker-bot/1.0)' },
@@ -430,7 +438,7 @@ async function fetchGoogleNewsRSS(query) {
     const title = stripSource(originalTitle);
     const pubDate = String(item.pubDate || '').trim();
 
-    if (!isWithinMaxAge(pubDate)) continue; // too old — drop regardless of when: having worked
+    if (!isWithinMaxAge(pubDate, maxAgeDays)) continue; // too old — drop regardless of when: having worked
     if (!isLikelyMultiSite(title)) continue; // no multi-site indicator — likely a one-off single premises
 
     results.push({
@@ -447,11 +455,11 @@ async function fetchGoogleNewsRSS(query) {
   return results;
 }
 
-async function fetchAllRSS(queries) {
+async function fetchAllRSS(queries, maxAgeDays = MAX_AGE_DAYS) {
   const results = [];
   for (const q of queries) {
     try {
-      const items = await fetchGoogleNewsRSS(q);
+      const items = await fetchGoogleNewsRSS(q, maxAgeDays);
       results.push(...items);
       await new Promise(r => setTimeout(r, 400));
     } catch (e) {
@@ -767,6 +775,149 @@ async function appendToGoogleSheet(rows) {
   }
 }
 
+// =========================================================================
+// ONE-TIME BACKFILL MODE — separate from the ongoing weekly mechanism above.
+// Run via `node fetch-signals.mjs --backfill`. Wipes Sheet1 and repopulates it with a wide
+// 90-day historical snapshot across all four sources, regardless of the ongoing
+// MAX_AGE_DAYS window set above. Standalone: never touches ensureDatedSheetTab or creates
+// a dated tab, and appendToGoogleSheet (the ongoing writer) is left completely alone.
+// =========================================================================
+const BACKFILL_MAX_AGE_DAYS = 90;
+
+// Clears Sheet1 entirely (all rows, not just data below the header), writes the header
+// fresh, appends every row, then applies the same basic filter new dated tabs get. Sheet1's
+// sheetId isn't assumed to be 0 — looked up the same way ensureDatedSheetTab looks up a
+// dated tab's sheetId, so this still works if Sheet1 was ever renamed or reordered.
+async function overwriteSheet1(rows) {
+  const { GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SHEET_ID } = process.env;
+  if (!GOOGLE_SERVICE_ACCOUNT_JSON || !GOOGLE_SHEET_ID) {
+    console.error('Google Sheets credentials not set — skipping Sheet1 backfill write. See README for setup.');
+    return false;
+  }
+
+  try {
+    const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: 'Sheet1',
+    });
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: 'Sheet1!A1:F1',
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [SHEET_HEADER] },
+    });
+
+    const values = rows.map(r => [r.business, r.category, r.location, r.region || 'Unclassified', r.sourceLink, r.date || '']);
+    if (values.length > 0) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: GOOGLE_SHEET_ID,
+        range: 'Sheet1!A:F',
+        valueInputOption: 'USER_ENTERED',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values },
+      });
+    }
+
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      fields: 'sheets.properties',
+    });
+    const sheet1 = (meta.data.sheets || []).find(s => s.properties.title === 'Sheet1');
+    if (sheet1) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: GOOGLE_SHEET_ID,
+        requestBody: {
+          requests: [{
+            setBasicFilter: {
+              filter: {
+                range: {
+                  sheetId: sheet1.properties.sheetId,
+                  startRowIndex: 0,
+                  startColumnIndex: 0,
+                  endColumnIndex: SHEET_HEADER.length,
+                },
+              },
+            },
+          }],
+        },
+      });
+    } else {
+      console.error('Sheet1 not found in the spreadsheet — filter not applied.');
+    }
+
+    console.log(`Backfilled Sheet1 with ${rows.length} row(s) and applied a filter.`);
+    return true;
+  } catch (e) {
+    console.error('Sheet1 backfill write failed:', e.message);
+    return false;
+  }
+}
+
+// One-time historical dump: last 90 days across all four sources, written into Sheet1.
+//
+// seen.json decision, explained: this DOES mark every backfilled item's guid as seen (via
+// the same new-guids.json -> merge-seen.mjs path the ongoing mechanism uses). The instinctive
+// answer might be "a one-off backfill shouldn't touch ongoing dedup state at all" — but
+// that's wrong here: without it, a story backfilled into Sheet1 that's still within the
+// ongoing mechanism's much narrower windows (10 days for RSS, 14 for Adzuna, 10 for
+// Companies House) would immediately reappear as "new" in next week's dated tab, producing a
+// duplicate row for the same story within days of the backfill. Marking it seen prevents
+// that. For anything older than the ongoing windows (the bulk of a 90-day pull), marking it
+// seen is simply inert — it would never have been re-fetched anyway, since it's already
+// outside every ongoing source's own window regardless of seen.json.
+async function backfillSheet1() {
+  console.log('=== BACKFILL MODE: one-time Sheet1 historical dump (last 90 days), separate from the ongoing weekly mechanism ===');
+
+  console.log('Fetching growth signals (Google News, 90-day window)...');
+  const growthItems = await fetchAllRSS(GROWTH_QUERIES, BACKFILL_MAX_AGE_DAYS);
+
+  console.log('Fetching physical risk signals (Google News, 90-day window)...');
+  const riskItems = await fetchAllRSS(RISK_QUERIES, BACKFILL_MAX_AGE_DAYS);
+
+  console.log('Fetching Adzuna pre-opening/launch job signals...');
+  const adzunaItems = await fetchAdzunaSignals();
+
+  console.log('Running Companies House SIC-code sweep...');
+  const chSweepItems = await fetchCompaniesHouseIncorporationSweep();
+
+  const allItems = [...growthItems, ...riskItems, ...adzunaItems, ...chSweepItems];
+  console.log(`Backfill fetched ${allItems.length} total item(s) before within-batch dedupe.`);
+
+  // De-dupe within this batch only (e.g. two RSS queries matching the same article) — NOT
+  // against seen.json. This is a fresh historical snapshot, not constrained by whatever
+  // ongoing runs have already surfaced elsewhere.
+  const seenInBatch = new Set();
+  const uniqueItems = [];
+  for (const item of allItems) {
+    if (seenInBatch.has(item.guid)) continue;
+    seenInBatch.add(item.guid);
+    uniqueItems.push(item);
+  }
+  console.log(`${uniqueItems.length} unique item(s) after within-batch dedupe.`);
+
+  await applyLLMBusinessNameFallback(uniqueItems);
+
+  const sheetOk = await overwriteSheet1(uniqueItems);
+  if (!sheetOk) {
+    console.error('Backfill Sheet1 write failed — not updating seen.json.');
+    process.exit(1);
+  }
+
+  fs.writeFileSync(NEW_GUIDS_PATH, JSON.stringify(uniqueItems.map(item => item.guid), null, 2));
+  console.log(`Wrote ${uniqueItems.length} GUID(s) to new-guids.json — the workflow's merge-seen.mjs step commits these to seen.json, same as an ongoing run.`);
+
+  logFailures(uniqueItems);
+  console.log('=== BACKFILL COMPLETE ===');
+}
+
 async function sendRunNotification(newCount, sheetWriteOk) {
   const { GMAIL_USER, GMAIL_APP_PASSWORD, DIGEST_TO_EMAIL } = process.env;
   if (!GMAIL_USER || !GMAIL_APP_PASSWORD || !DIGEST_TO_EMAIL) return;
@@ -827,7 +978,14 @@ async function main() {
   logFailures(newItems);
 }
 
-main().catch(err => {
-  console.error('Fatal error in fetch-signals script:', err);
-  process.exit(1);
-});
+// Only run when this file is executed directly (`node fetch-signals.mjs`), not when
+// imported as a module — otherwise every import would trigger live API calls and a real
+// Sheet write. `--backfill` switches to the one-time Sheet1 historical dump; anything else
+// runs the normal ongoing weekly flow.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const run = process.argv.includes('--backfill') ? backfillSheet1() : main();
+  run.catch(err => {
+    console.error('Fatal error in fetch-signals script:', err);
+    process.exit(1);
+  });
+}

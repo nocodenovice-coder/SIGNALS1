@@ -29,10 +29,13 @@ Every row gets classified into exactly one of these (edit `classifyCategory()` i
 
 - **Google News RSS (growth queries)** — free, catches announcements and press coverage of
   openings, relocations, and refurbishments. Unofficial endpoint, could change without notice.
+  Windowed to the last 10 days (`MAX_AGE_DAYS` in `fetch-signals.mjs`) — sized for the weekly
+  cadence, not the wider 90 days used only by the one-time Sheet1 backfill (see above).
 - **Google News RSS (risk queries)** — free, catches news coverage of burglaries, robberies, and
   vandalism at named businesses. This is the primary source for the risk side of the sheet,
   specifically *because* news articles name the business and link to a source — see the
   data.police.uk note below for why that data doesn't work here despite being more "official."
+  Same 10-day window as the growth queries.
 - **Adzuna job postings** — free (1,000 calls/month), catches "pre-opening team," "launch team,"
   "grand opening manager" listings. **The `JOB_TITLES` array near the top of `fetch-signals.mjs`
   is meant for you to edit** — add or remove job titles freely. This is the one part of the
@@ -109,8 +112,26 @@ the script checks for them and just skips sending if they're not set.
 check your Google Sheet for new rows.
 
 ### 5. Adjust the schedule
-Default is 07:00 UTC daily in `.github/workflows/fetch-signals.yml` — edit the cron line to
-change timing.
+Default is weekly, Monday 07:00 UTC, in `.github/workflows/fetch-signals.yml` — edit the cron
+line to change timing.
+
+## One-time historical backfill
+
+`Sheet1` (the default tab) isn't part of the ongoing weekly mechanism — it's meant to hold a
+one-off historical snapshot rather than a dated tab. To (re)populate it: **Actions** tab →
+"Fetch site tracker signals" → **Run workflow** → tick the **backfill** checkbox → **Run
+workflow**. This runs `node fetch-signals.mjs --backfill` instead of the normal weekly fetch:
+
+- Pulls a wide **90-day** window across all four sources (regardless of the ongoing RSS
+  window below), each row with its own real source date.
+- Clears `Sheet1` entirely and rewrites it fresh — header, data, and filter — rather than
+  appending.
+- Marks every backfilled item as seen in `seen.json`, so a story that's still within the
+  ongoing mechanism's much narrower window doesn't immediately duplicate into next week's
+  dated tab. Anything older than the ongoing windows is unaffected either way — it was never
+  going to be re-fetched again regardless.
+
+It's a manual, occasional action, not something the schedule ever triggers on its own.
 
 ## Job titles for the Adzuna search
 
